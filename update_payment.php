@@ -14,27 +14,31 @@ try {
     $pdo->beginTransaction();
 
     // Lấy thông tin installment
-    $stmt = $pdo->prepare("SELECT i.*, c.name, c.remaining FROM installments i JOIN customers c ON i.customer_id = c.id WHERE i.id = ?");
+    $stmt = $pdo->prepare("SELECT i.*, c.name, c.remaining, c.id as customer_id FROM installments i JOIN customers c ON i.customer_id = c.id WHERE i.id = ?");
     $stmt->execute([$installment_id]);
     $inst = $stmt->fetch(PDO::FETCH_ASSOC);
 
-    if ($inst && $inst['status'] === 'pending') {
-        // Cập nhật trạng thái thành 'paid' và ngày trả tiền là ngày hôm nay
+    if ($inst && in_array($inst['status'], ['pending', 'late'])) {
         $today = date('Y-m-d');
+        
+        // 1. Cập nhật trạng thái installment thành 'paid'
         $upd = $pdo->prepare("UPDATE installments SET status = 'paid', payment_date = ? WHERE id = ?");
         $upd->execute([$today, $installment_id]);
 
-        // Cập nhật số tiền remaining cho bảng khách hàng
-        // Lấy số dư hiện tại trừ đi số tiền bill của installment này
+        // 2. Cập nhật remaining và debt_status
         $new_remaining = $inst['remaining'] - $inst['amount'];
-        // Không để số dư âm (đôi khi khách đóng dư tí)
-        if ($new_remaining < 0) $new_remaining = 0; 
+        $new_debt_status = 'in_progress';
         
-        $updCust = $pdo->prepare("UPDATE customers SET remaining = ? WHERE id = ?");
-        $updCust->execute([$new_remaining, $inst['customer_id']]);
+        if ($new_remaining <= 0) {
+            $new_remaining = 0; 
+            $new_debt_status = 'completed';
+        }
+        
+        $updCust = $pdo->prepare("UPDATE customers SET remaining = ?, debt_status = ? WHERE id = ?");
+        $updCust->execute([$new_remaining, $new_debt_status, $inst['customer_id']]);
 
-        // Ghi Log
-        $moneyFmt = number_format($inst['amount'], 2);
+        // 4. Ghi Log
+        $moneyFmt = number_format($inst['amount'], 0, ',', '.');
         $desc = "Đã thu tiền Đợt {$inst['payment_number']} ({$moneyFmt}) của khách hàng '{$inst['name']}'. (Ngày thu: $today)";
         
         $logStmt = $pdo->prepare("INSERT INTO activity_logs (user_id, action, description) VALUES (?, ?, ?)");
@@ -42,10 +46,15 @@ try {
 
         $pdo->commit();
     } else {
-        $pdo->rollBack(); // Installment đã update trước đó hoặc ko tìm thấy
+        $pdo->rollBack();
     }
 
-    header("Location: index.php");
+    // Hỗ trợ redirect quay lại customer_detail nếu đến từ trang đó
+    if (isset($_GET['redirect']) && $_GET['redirect'] === 'customer_detail' && isset($_GET['cid'])) {
+        header("Location: customer_detail.php?id=" . intval($_GET['cid']));
+    } else {
+        header("Location: index.php");
+    }
     exit;
 
 } catch (Exception $e) {

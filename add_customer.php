@@ -20,7 +20,7 @@ if ($_SESSION['role'] === 'admin') {
         <h4 class="mb-4"><i class="bi bi-person-plus text-primary"></i> LÊN HỒ SƠ KHÁCH HÀNG MỚI</h4>
         <div class="card shadow-sm border-0">
             <div class="card-body">
-                <form action="add_customer_action.php" method="POST" id="customerForm">
+                <form action="add_customer_action.php" method="POST" id="customerForm" enctype="multipart/form-data">
                     <h5 class="text-secondary mb-3"><i class="bi bi-info-circle"></i> THÔNG TIN CHUNG</h5>
                     <div class="row mb-4">
                         <div class="col-md-3 mb-3">
@@ -32,7 +32,12 @@ if ($_SESSION['role'] === 'admin') {
                             <select name="gender" class="form-select">
                                 <option value="Male">Nam (Male)</option>
                                 <option value="Female">Nữ (Female)</option>
+                                <option value="Khác">Khác</option>
                             </select>
+                        </div>
+                        <div class="col-md-3 mb-3">
+                            <label class="form-label fw-semibold">Email khách hàng</label>
+                            <input type="email" name="email" class="form-control" placeholder="nguyenvana@gmail.com">
                         </div>
                         <div class="col-md-3 mb-3">
                             <label class="form-label fw-semibold">Người Quản Lý Sale</label>
@@ -48,10 +53,11 @@ if ($_SESSION['role'] === 'admin') {
                             <?php endif; ?>
                         </div>
                         <div class="col-md-4 mb-3">
-                            <label class="form-label fw-semibold">Link File ĐH (Drive/Docs)</label>
-                            <input type="url" name="treatment_file" class="form-control" placeholder="https://drive.google.com/...">
+                            <label class="form-label fw-semibold">File HD/Kế hoạch (PDF/Ảnh)</label>
+                            <input type="file" name="treatment_file" class="form-control" accept=".pdf,image/*">
                         </div>
-                        <div class="col-md-4 mb-3">
+
+                        <div class="col-md-3 mb-3">
                             <label class="form-label fw-semibold text-danger">Tổng hoá đơn (Total Bill) *</label>
                             <input type="number" name="total_bill" class="form-control fw-bold text-danger" required placeholder="Vd: 50000" id="total_bill" step="0.01">
                         </div>
@@ -64,9 +70,31 @@ if ($_SESSION['role'] === 'admin') {
                                 <option value="VND">VND</option>
                             </select>
                         </div>
+                        <div class="col-md-3 mb-3">
+                            <label class="form-label fw-semibold text-warning">Tiền đăng ký trả góp *</label>
+                            <input type="number" name="initial_debt" class="form-control fw-bold text-warning" required placeholder="Vd: 30000" id="initial_debt" step="0.01">
+                        </div>
+
+                        <!-- CÁC TRƯỜNG MỚI -->
+                        <div class="col-md-3 mb-3">
+                            <label class="form-label fw-semibold"><i class="bi bi-calendar-event"></i> Ngày hoàn thành liệu trình</label>
+                            <input type="date" name="completion_date" class="form-control">
+                        </div>
                         <div class="col-md-4 mb-3">
-                            <label class="form-label fw-semibold text-warning">Tiền còn nợ (Remaining) *</label>
-                            <input type="number" name="remaining" class="form-control fw-bold text-warning" required placeholder="Vd: 30000" id="remaining" step="0.01">
+                            <label class="form-label fw-semibold">Hình thức trả góp <i class="bi bi-info-circle text-muted" data-bs-toggle="tooltip" title="Chọn hình thức thanh toán"></i></label>
+                            <select name="payment_type" class="form-select bg-light">
+                                <option value="monthly">Theo tháng</option>
+                                <option value="trip2">Trip 2</option>
+                                <option value="trip3">Trip 3</option>
+                            </select>
+                        </div>
+                        <div class="col-md-3 mb-3">
+                            <label class="form-label fw-semibold"><i class="bi bi-flag"></i> Trạng thái nợ</label>
+                            <select name="debt_status" class="form-select">
+                                <option value="in_progress">Chưa hoàn thành</option>
+                                <option value="completed">Đã hoàn thành</option>
+                                <option value="bad_debt">Nợ xấu</option>
+                            </select>
                         </div>
                     </div>
 
@@ -84,7 +112,6 @@ if ($_SESSION['role'] === 'admin') {
                                 </tr>
                             </thead>
                             <tbody id="installmentBody">
-                                <!-- JS sẽ render vào đây -->
                             </tbody>
                         </table>
                         <button type="button" class="btn btn-sm btn-outline-primary" onclick="addInstallmentRow()">
@@ -147,12 +174,10 @@ if ($_SESSION['role'] === 'admin') {
         });
     }
 
-    // Tự động thêm đợt 1
     addInstallmentRow();
 
-    // Mẹo UX: Tự động set remaining bằng total_bill ban đầu
     document.getElementById('total_bill').addEventListener('input', function() {
-        document.getElementById('remaining').value = this.value;
+        document.getElementById('initial_debt').value = this.value;
     });
 </script>
 </body>
