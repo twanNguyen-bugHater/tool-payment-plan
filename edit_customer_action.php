@@ -2,6 +2,7 @@
 // Tên file: edit_customer_action.php
 session_start();
 require 'db.php';
+require 'recalc_debt.php';
 
 if ($_SERVER['REQUEST_METHOD'] !== 'POST' || !isset($_POST['customer_id'])) {
     die("Invalid request");
@@ -46,6 +47,7 @@ try {
     $payment_type = $_POST['payment_type'];
     $total_bill = floatval($_POST['total_bill']);
     $initial_debt = floatval($_POST['initial_debt']);
+    $completion_date = !empty($_POST['completion_date']) ? $_POST['completion_date'] : null;
 
     // Handle File Upload
     $treatment_file = $customer['treatment_file']; // Mặc định giữ lại file cũ
@@ -129,16 +131,12 @@ try {
     }
 
     // 5. Tự động tính Remaining và Debt Status
-    $new_remaining = $initial_debt - $total_paid_money;
-    if ($new_remaining <= 0) {
-        $new_remaining = 0;
-        $new_debt_status = 'completed'; // Chỉ hoàn thành khi thực sự đóng đủ tiền mốc đăng ký
-    } else {
-        $new_debt_status = 'in_progress';
-    }
-    
-    $updRemaining = $pdo->prepare("UPDATE customers SET remaining = ?, debt_status = ? WHERE id = ?");
-    $updRemaining->execute([$new_remaining, $new_debt_status, $customer_id]);
+    $new_remaining = max(0, $initial_debt - $total_paid_money);
+    $updRemaining = $pdo->prepare("UPDATE customers SET remaining = ? WHERE id = ?");
+    $updRemaining->execute([$new_remaining, $customer_id]);
+
+    // Tính lại debt_status theo quy tắc tự động (nợ xấu nếu quá hạn >= 90 ngày)
+    recalcDebtStatus($pdo, $customer_id);
 
 
     // 6. Ghi Log Cập nhật

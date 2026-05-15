@@ -11,6 +11,7 @@
 
 require 'db.php';
 require 'email_config.php';
+require 'recalc_debt.php';
 
 // Load PHPMailer (nếu dùng)
 if (EMAIL_METHOD === 'phpmailer') {
@@ -35,7 +36,19 @@ if (EMAIL_METHOD === 'phpmailer') {
 
 try {
     $today = date('Y-m-d');
+
+    // ===== BƯỚC 1: TỰ ĐỘNG CẬP NHẬT TRẠNG THÁI NỢ XẤU =====
+    // Quét tất cả khách hàng chưa hoàn thành, tính lại debt_status
+    $stmtAll = $pdo->query("SELECT id FROM customers WHERE debt_status != 'completed'");
+    $pendingCustomers = $stmtAll->fetchAll(PDO::FETCH_COLUMN);
+    $badDebtUpdated = 0;
+    foreach ($pendingCustomers as $cid) {
+        $newStatus = recalcDebtStatus($pdo, (int)$cid);
+        if ($newStatus === 'bad_debt') $badDebtUpdated++;
+    }
+    echo "🔄 Đã kiểm tra " . count($pendingCustomers) . " khách hàng. Nợ xấu mới: {$badDebtUpdated}.\n";
     
+    // ===== BƯỚC 2: GỬI EMAIL NHẮC NỢ =====
     // Quét các đợt trả góp PENDING đã đến hạn hoặc quá hạn
     // Chỉ gửi cho Leader có email
     $sql = "SELECT i.payment_number, i.amount, i.due_date, 

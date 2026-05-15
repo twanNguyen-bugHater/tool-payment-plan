@@ -2,6 +2,7 @@
 // Tên file: update_payment.php
 session_start();
 require 'db.php';
+require 'recalc_debt.php';
 
 if (!isset($_SESSION['user_id']) || !isset($_GET['id']) || $_GET['action'] !== 'paid') {
     die("Invalid request");
@@ -25,17 +26,13 @@ try {
         $upd = $pdo->prepare("UPDATE installments SET status = 'paid', payment_date = ? WHERE id = ?");
         $upd->execute([$today, $installment_id]);
 
-        // 2. Cập nhật remaining và debt_status
-        $new_remaining = $inst['remaining'] - $inst['amount'];
-        $new_debt_status = 'in_progress';
-        
-        if ($new_remaining <= 0) {
-            $new_remaining = 0; 
-            $new_debt_status = 'completed';
-        }
-        
-        $updCust = $pdo->prepare("UPDATE customers SET remaining = ?, debt_status = ? WHERE id = ?");
-        $updCust->execute([$new_remaining, $new_debt_status, $inst['customer_id']]);
+        // 2. Cập nhật remaining
+        $new_remaining = max(0, $inst['remaining'] - $inst['amount']);
+        $updCust = $pdo->prepare("UPDATE customers SET remaining = ? WHERE id = ?");
+        $updCust->execute([$new_remaining, $inst['customer_id']]);
+
+        // 3. Tính lại debt_status theo quy tắc tự động
+        recalcDebtStatus($pdo, $inst['customer_id']);
 
         // 4. Ghi Log
         $moneyFmt = number_format($inst['amount'], 0, ',', '.');

@@ -48,13 +48,13 @@ function getStatusBadgeD($status, $dueDate) {
     if ($status === 'pending' && strtotime($dueDate) < strtotime(date('Y-m-d'))) {
         return '<span class="badge bg-danger">Quá hạn</span>';
     }
-    if ($status === 'late') return '<span class="badge bg-warning text-dark">Trễ hẹn</span>';
+    if ($status === 'late') return '<span class="badge bg-warning text-dark">Quá hạn</span>';
     if ($status === 'cancelled') return '<span class="badge bg-dark border border-secondary">Nợ xấu</span>';
     return '<span class="badge bg-light text-dark border">Chờ thu</span>';
 }
 function getDebtBadgeD($s) {
     if ($s === 'completed') return '<span class="badge bg-success fs-6">Hoàn thành</span>';
-    if ($s === 'bad_debt') return '<span class="badge bg-danger fs-6">Nợ xấu</span>';
+    if ($s === 'bad_debt') return '<span class="badge bg-dark fs-6">Nợ xấu</span>';
     return '<span class="badge bg-warning text-dark fs-6">Chưa hoàn thành</span>';
 }
 function getPaymentTypeLabelD($t) {

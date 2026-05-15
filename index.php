@@ -2,6 +2,16 @@
 // Tên file: index.php
 require 'db.php';
 require 'header.php';
+require 'recalc_debt.php';
+
+// ======== TỰ ĐỘNG CẬP NHẬT NỢ XẤU KHI LOAD TRANG ========
+if (empty($_SESSION['last_recalc']) || (time() - $_SESSION['last_recalc']) > 3600) {
+    $stmtPending = $pdo->query("SELECT id FROM customers WHERE debt_status != 'completed'");
+    foreach ($stmtPending->fetchAll(PDO::FETCH_COLUMN) as $cid) {
+        recalcDebtStatus($pdo, (int)$cid);
+    }
+    $_SESSION['last_recalc'] = time();
+}
 
 // ============ BỘ LỌC (FILTERS) ============
 $filter_name = $_GET['filter_name'] ?? '';
@@ -11,6 +21,7 @@ $filter_status = isset($_GET['filter_status']) ? $_GET['filter_status'] : 'pendi
 $filter_debt = $_GET['filter_debt'] ?? '';
 $filter_payment_type = $_GET['filter_payment_type'] ?? '';
 $filter_sale = $_GET['filter_sale'] ?? '';
+$filter_currency = $_GET['filter_currency'] ?? '';
 $sort_by = $_GET['sort_by'] ?? 'due_asc'; // Mặc định sắp xếp ngày đến hạn gần nhất
 
 // Phân quyền: Sale chỉ thấy khách của mình
@@ -55,6 +66,10 @@ if (!empty($filter_sale)) {
     $whereClause .= " AND c.sale_id = ?";
     $params[] = $filter_sale;
 }
+if (!empty($filter_currency)) {
+    $whereClause .= " AND c.currency = ?";
+    $params[] = $filter_currency;
+}
 
 // Lấy danh sách Sale cho bộ lọc (Admin/Leader)
 $saleList = [];
@@ -68,10 +83,14 @@ if ($_SESSION['role'] === 'admin') {
 
 // Xây dựng câu lệnh ORDER BY
 $orderBy = "ORDER BY i.due_date ASC";
-if ($sort_by === 'due_desc') $orderBy = "ORDER BY i.due_date DESC";
-elseif ($sort_by === 'amount_desc') $orderBy = "ORDER BY i.amount DESC";
-elseif ($sort_by === 'amount_asc') $orderBy = "ORDER BY i.amount ASC";
-elseif ($sort_by === 'remaining_desc') $orderBy = "ORDER BY c.remaining DESC";
+if ($sort_by === 'due_desc')
+    $orderBy = "ORDER BY i.due_date DESC";
+elseif ($sort_by === 'amount_desc')
+    $orderBy = "ORDER BY i.amount DESC";
+elseif ($sort_by === 'amount_asc')
+    $orderBy = "ORDER BY i.amount ASC";
+elseif ($sort_by === 'remaining_desc')
+    $orderBy = "ORDER BY c.remaining DESC";
 
 $sql = "SELECT i.*, c.name as customer_name, c.email, c.currency, c.remaining, c.total_bill,
                c.completion_date, c.payment_type, c.debt_status, c.id as cust_id,
@@ -87,6 +106,15 @@ $sql = "SELECT i.*, c.name as customer_name, c.email, c.currency, c.remaining, c
 $stmt = $pdo->prepare($sql);
 $stmt->execute($params);
 $installments = $stmt->fetchAll(PDO::FETCH_ASSOC);
+
+// Đếm tổng số khách hàng duy nhất theo bộ lọc hiện tại
+$uniqueCustomerIds = array_unique(array_column($installments, 'cust_id'));
+$totalCustomers = count($uniqueCustomerIds);
+
+// Kiểm tra xem có đang lọc không (trừ sort_by)
+$isFiltered = !empty($filter_name) || !empty($filter_date_from) || !empty($filter_date_to)
+    || !empty($filter_status) || !empty($filter_debt) || !empty($filter_payment_type)
+    || !empty($filter_sale) || !empty($filter_currency);
 
 // ===== THỐNG KÊ CHO BIỂU ĐỒ (Admin/Leader) =====
 $chartData = [];
@@ -110,6 +138,26 @@ if ($_SESSION['role'] === 'admin' || $_SESSION['role'] === 'leader' || $_SESSION
         }
         $roleParams[] = $filter_sale;
     }
+
+    // Áp dụng bộ lọc Tiền tệ
+    if (!empty($filter_currency)) {
+        if ($roleFilter === "") {
+            $roleFilter = "WHERE c.currency = ?";
+        } else {
+            $roleFilter .= " AND c.currency = ?";
+        }
+        $roleParams[] = $filter_currency;
+    }
+
+    // Thống kê quá hạn
+    $q_overdue = $pdo->prepare("SELECT COUNT(DISTINCT c.id) as overdue_customers, COUNT(i.id) as overdue_installments
+                                FROM installments i 
+                                JOIN customers c ON i.customer_id = c.id
+                                LEFT JOIN users u ON c.sale_id = u.id
+                                " . ($roleFilter ? $roleFilter . " AND" : "WHERE") . " 
+                                i.status = 'pending' AND i.due_date < CURRENT_DATE()");
+    $q_overdue->execute($roleParams);
+    $chartData['overdue_stats'] = $q_overdue->fetch(PDO::FETCH_ASSOC);
 
     // Tổng nợ toàn bộ & Tổng hóa đơn (Theo từng Currency)
     $q1 = $pdo->prepare("SELECT c.currency, COALESCE(SUM(c.remaining),0) as total_remaining, COALESCE(SUM(c.total_bill),0) as total_bill FROM customers c LEFT JOIN users u ON c.sale_id = u.id $roleFilter GROUP BY c.currency");
@@ -161,12 +209,13 @@ if ($_SESSION['role'] === 'admin' || $_SESSION['role'] === 'leader' || $_SESSION
         $qmParams = array_merge($roleParams, [$ms, $me]);
         $qm->execute($qmParams);
         $month_totals = $qm->fetchAll(PDO::FETCH_ASSOC);
-        
+
         $entry = ['label' => $label, 'amounts' => []];
-        foreach($month_totals as $mt) {
-            $curr = $mt['currency'] ?: 'VND'; 
+        foreach ($month_totals as $mt) {
+            $curr = $mt['currency'] ?: 'VND';
             $entry['amounts'][$curr] = floatval($mt['total']);
-            if(!in_array($curr, $all_currencies)) $all_currencies[] = $curr;
+            if (!in_array($curr, $all_currencies))
+                $all_currencies[] = $curr;
         }
         $monthly_data[] = $entry;
     }
@@ -175,25 +224,35 @@ if ($_SESSION['role'] === 'admin' || $_SESSION['role'] === 'leader' || $_SESSION
 }
 
 // Helper functions - VIẾT ĐẦY ĐỦ KHÔNG VIẾT TẮT
-function getStatusBadge($status, $dueDate) {
-    if ($status === 'paid') return '<span class="badge bg-success">Đã thu (PAID)</span>';
+function getStatusBadge($status, $dueDate)
+{
+    if ($status === 'paid')
+        return '<span class="badge bg-success">Đã thu (PAID)</span>';
     if ($status === 'pending' && strtotime($dueDate) < strtotime(date('Y-m-d'))) {
         return '<span class="badge bg-danger">Quá hạn</span>';
     }
-    if ($status === 'late') return '<span class="badge bg-warning text-dark">Trễ hẹn</span>';
-    if ($status === 'cancelled') return '<span class="badge bg-dark border border-secondary">Nợ xấu</span>';
+    if ($status === 'late')
+        return '<span class="badge bg-warning text-dark">Quá hạn</span>';
+    if ($status === 'cancelled')
+        return '<span class="badge bg-dark border border-secondary">Nợ xấu</span>';
     return '<span class="badge bg-light text-dark border">Chờ thu</span>';
 }
 
-function getDebtBadge($debt_status) {
-    if ($debt_status === 'completed') return '<span class="badge bg-success">Đã hoàn thành</span>';
-    if ($debt_status === 'bad_debt') return '<span class="badge bg-danger">Nợ xấu</span>';
+function getDebtBadge($debt_status)
+{
+    if ($debt_status === 'completed')
+        return '<span class="badge bg-success">Đã hoàn thành</span>';
+    if ($debt_status === 'bad_debt')
+        return '<span class="badge bg-dark">Nợ xấu</span>';
     return '<span class="badge bg-warning text-dark">Chưa hoàn thành</span>';
 }
 
-function getPaymentTypeBadge($type) {
-    if ($type === 'trip3') return '<span class="badge" style="background-color: #6f42c1; color: white;">Trip 3</span>';
-    if ($type === 'trip2') return '<span class="badge bg-info text-dark">Trip 2</span>';
+function getPaymentTypeBadge($type)
+{
+    if ($type === 'trip3')
+        return '<span class="badge" style="background-color: #6f42c1; color: white;">Trip 3</span>';
+    if ($type === 'trip2')
+        return '<span class="badge bg-info text-dark">Trip 2</span>';
     return '<span class="badge bg-primary">Theo tháng</span>';
 }
 ?>
@@ -206,74 +265,106 @@ function getPaymentTypeBadge($type) {
     <a href="add_customer.php" class="btn btn-primary"><i class="bi bi-plus-circle"></i> Thêm Khách Hàng</a>
 </div>
 
+<?php if (isset($chartData['overdue_stats'])): ?>
+    <div class="alert alert-danger py-2 mb-3 shadow-sm border-0 d-flex align-items-center gap-3">
+        <div class="fs-4 text-danger"><i class="bi bi-exclamation-triangle-fill"></i></div>
+        <div>
+            <div class="fw-bold mb-1">Cảnh báo nợ quá hạn:</div>
+            <div class="small">
+                Tổng khách quá hạn thanh toán là: <span
+                    class="fw-bold fs-6"><?= number_format($chartData['overdue_stats']['overdue_customers']) ?></span>
+                &nbsp;|&nbsp;
+                Tổng món nợ quá hạn thanh toán là: <span
+                    class="fw-bold fs-6"><?= number_format($chartData['overdue_stats']['overdue_installments']) ?></span>
+            </div>
+        </div>
+    </div>
+<?php endif; ?>
+
 <!-- ========== BỘ LỌC ========== -->
 <div class="card shadow-sm border-0 mb-4">
     <div class="card-body py-3">
         <form method="GET" class="row g-2 align-items-end">
             <div class="col-md-2">
                 <label class="form-label small fw-semibold mb-1">Tên bệnh nhân</label>
-                <input type="text" name="filter_name" class="form-control form-control-sm" value="<?= htmlspecialchars($filter_name) ?>" placeholder="Tìm tên...">
+                <input type="text" name="filter_name" class="form-control form-control-sm"
+                    value="<?= htmlspecialchars($filter_name) ?>" placeholder="Tìm tên...">
             </div>
             <!-- BỘ LỌC SALE (Admin/Leader) -->
             <?php if ($_SESSION['role'] !== 'sale' && count($saleList) > 0): ?>
-            <div class="col-md-2">
-                <label class="form-label small fw-semibold mb-1">Sale quản lý</label>
-                <select name="filter_sale" class="form-select form-select-sm">
-                    <option value="">Tất cả Sale</option>
-                    <?php foreach ($saleList as $s): ?>
-                        <option value="<?= $s['id'] ?>" <?= $filter_sale==$s['id']?'selected':'' ?>><?= htmlspecialchars($s['username']) ?></option>
-                    <?php endforeach; ?>
-                </select>
-            </div>
+                <div class="col-md-2">
+                    <label class="form-label small fw-semibold mb-1">Sale quản lý</label>
+                    <select name="filter_sale" class="form-select form-select-sm">
+                        <option value="">Tất cả Sale</option>
+                        <?php foreach ($saleList as $s): ?>
+                            <option value="<?= $s['id'] ?>" <?= $filter_sale == $s['id'] ? 'selected' : '' ?>>
+                                <?= htmlspecialchars($s['username']) ?></option>
+                        <?php endforeach; ?>
+                    </select>
+                </div>
             <?php endif; ?>
             <div class="col-md-1">
                 <label class="form-label small fw-semibold mb-1">Từ ngày</label>
-                <input type="date" name="date_from" class="form-control form-control-sm" value="<?= htmlspecialchars($filter_date_from) ?>">
+                <input type="date" name="date_from" class="form-control form-control-sm"
+                    value="<?= htmlspecialchars($filter_date_from) ?>">
             </div>
             <div class="col-md-1">
                 <label class="form-label small fw-semibold mb-1">Đến ngày</label>
-                <input type="date" name="date_to" class="form-control form-control-sm" value="<?= htmlspecialchars($filter_date_to) ?>">
+                <input type="date" name="date_to" class="form-control form-control-sm"
+                    value="<?= htmlspecialchars($filter_date_to) ?>">
             </div>
             <div class="col-md-1">
-                <label class="form-label small fw-semibold mb-1">Trạng thái đợt</label>
+                <label class="form-label small fw-semibold mb-1">Trạng thái đợt thanh toán</label>
                 <select name="filter_status" class="form-select form-select-sm">
                     <option value="">Tất cả</option>
-                    <option value="pending" <?= $filter_status=='pending'?'selected':'' ?>>Chờ thu</option>
-                    <option value="paid" <?= $filter_status=='paid'?'selected':'' ?>>Đã thu</option>
-                    <option value="late" <?= $filter_status=='late'?'selected':'' ?>>Trễ hẹn</option>
+                    <option value="pending" <?= $filter_status == 'pending' ? 'selected' : '' ?>>Chờ thu</option>
+                    <option value="paid" <?= $filter_status == 'paid' ? 'selected' : '' ?>>Đã thu</option>
+                    <option value="late" <?= $filter_status == 'late' ? 'selected' : '' ?>>Quá hạn</option>
                 </select>
             </div>
             <div class="col-md-1">
                 <label class="form-label small fw-semibold mb-1">Trạng thái nợ</label>
                 <select name="filter_debt" class="form-select form-select-sm">
                     <option value="">Tất cả</option>
-                    <option value="in_progress" <?= $filter_debt=='in_progress'?'selected':'' ?>>Chưa hoàn thành</option>
-                    <option value="completed" <?= $filter_debt=='completed'?'selected':'' ?>>Đã hoàn thành</option>
-                    <option value="bad_debt" <?= $filter_debt=='bad_debt'?'selected':'' ?>>Nợ xấu</option>
+                    <option value="in_progress" <?= $filter_debt == 'in_progress' ? 'selected' : '' ?>>Chưa hoàn thành</option>
+                    <option value="completed" <?= $filter_debt == 'completed' ? 'selected' : '' ?>>Đã hoàn thành</option>
+                    <option value="bad_debt" <?= $filter_debt == 'bad_debt' ? 'selected' : '' ?>>Nợ xấu</option>
                 </select>
             </div>
             <div class="col-md-2">
                 <label class="form-label small fw-semibold mb-1">Hình thức</label>
                 <select name="filter_payment_type" class="form-select form-select-sm">
                     <option value="">Tất cả</option>
-                    <option value="monthly" <?= $filter_payment_type=='monthly'?'selected':'' ?>>Theo tháng</option>
-                    <option value="trip2" <?= $filter_payment_type=='trip2'?'selected':'' ?>>Trip 2</option>
-                    <option value="trip3" <?= $filter_payment_type=='trip3'?'selected':'' ?>>Trip 3</option>
+                    <option value="monthly" <?= $filter_payment_type == 'monthly' ? 'selected' : '' ?>>Theo tháng</option>
+                    <option value="trip2" <?= $filter_payment_type == 'trip2' ? 'selected' : '' ?>>Trip 2</option>
+                    <option value="trip3" <?= $filter_payment_type == 'trip3' ? 'selected' : '' ?>>Trip 3</option>
+                </select>
+            </div>
+            <div class="col-md-1">
+                <label class="form-label small fw-semibold mb-1">Tiền tệ</label>
+                <select name="filter_currency" class="form-select form-select-sm">
+                    <option value="">Tất cả</option>
+                    <option value="AUD" <?= $filter_currency == 'AUD' ? 'selected' : '' ?>>AUD</option>
+                    <option value="NZD" <?= $filter_currency == 'NZD' ? 'selected' : '' ?>>NZD</option>
+                    <option value="USD" <?= $filter_currency == 'USD' ? 'selected' : '' ?>>USD</option>
+                    <option value="VND" <?= $filter_currency == 'VND' ? 'selected' : '' ?>>VND</option>
                 </select>
             </div>
             <div class="col-md-2">
                 <label class="form-label small fw-semibold mb-1"><i class="bi bi-sort-down"></i> Sắp xếp</label>
                 <select name="sort_by" class="form-select form-select-sm border-primary">
-                    <option value="due_asc" <?= $sort_by=='due_asc'?'selected':'' ?>>Hạn đóng (Gần nhất)</option>
-                    <option value="due_desc" <?= $sort_by=='due_desc'?'selected':'' ?>>Hạn đóng (Xa nhất)</option>
-                    <option value="amount_desc" <?= $sort_by=='amount_desc'?'selected':'' ?>>Cần thu (Cao nhất)</option>
-                    <option value="amount_asc" <?= $sort_by=='amount_asc'?'selected':'' ?>>Cần thu (Thấp nhất)</option>
-                    <option value="remaining_desc" <?= $sort_by=='remaining_desc'?'selected':'' ?>>Còn nợ (Tổng cao nhất)</option>
+                    <option value="due_asc" <?= $sort_by == 'due_asc' ? 'selected' : '' ?>>Hạn đóng (Gần nhất)</option>
+                    <option value="due_desc" <?= $sort_by == 'due_desc' ? 'selected' : '' ?>>Hạn đóng (Xa nhất)</option>
+                    <option value="amount_desc" <?= $sort_by == 'amount_desc' ? 'selected' : '' ?>>Cần thu (Cao nhất)</option>
+                    <option value="amount_asc" <?= $sort_by == 'amount_asc' ? 'selected' : '' ?>>Cần thu (Thấp nhất)</option>
+                    <option value="remaining_desc" <?= $sort_by == 'remaining_desc' ? 'selected' : '' ?>>Còn nợ (Tổng cao nhất)
+                    </option>
                 </select>
             </div>
             <div class="col-md-3 d-flex gap-1">
                 <button class="btn btn-sm btn-primary w-100"><i class="bi bi-funnel"></i> Lọc</button>
-                <a href="index.php" class="btn btn-sm btn-outline-secondary w-100"><i class="bi bi-x-circle"></i> Xoá</a>
+                <a href="index.php" class="btn btn-sm btn-outline-secondary w-100"><i class="bi bi-x-circle"></i>
+                    Xoá</a>
             </div>
         </form>
     </div>
@@ -285,9 +376,11 @@ function getPaymentTypeBadge($type) {
         <div class="card bg-primary text-white shadow h-100">
             <div class="card-body py-3">
                 <h6 class="text-uppercase fw-bold opacity-75 small mb-2">Tổng Hóa Đơn</h6>
-                <?php if(empty($chartData['summary'])): ?><h4 class="mb-0">0</h4><?php endif; ?>
-                <?php foreach($chartData['summary'] as $sum): ?>
-                    <div class="d-flex justify-content-between align-items-center mb-1 pb-1 border-bottom border-light border-opacity-25">
+                <?php if (empty($chartData['summary'])): ?>
+                    <h4 class="mb-0">0</h4><?php endif; ?>
+                <?php foreach ($chartData['summary'] as $sum): ?>
+                    <div
+                        class="d-flex justify-content-between align-items-center mb-1 pb-1 border-bottom border-light border-opacity-25">
                         <span class="small"><?= htmlspecialchars($sum['currency'] ?: 'VND') ?></span>
                         <h5 class="mb-0 fw-bold"><?= number_format($sum['total_bill'], 0) ?></h5>
                     </div>
@@ -299,9 +392,11 @@ function getPaymentTypeBadge($type) {
         <div class="card bg-danger text-white shadow h-100">
             <div class="card-body py-3">
                 <h6 class="text-uppercase fw-bold opacity-75 small mb-2">Tổng Nợ Còn Lại</h6>
-                <?php if(empty($chartData['summary'])): ?><h4 class="mb-0">0</h4><?php endif; ?>
-                <?php foreach($chartData['summary'] as $sum): ?>
-                    <div class="d-flex justify-content-between align-items-center mb-1 pb-1 border-bottom border-light border-opacity-25">
+                <?php if (empty($chartData['summary'])): ?>
+                    <h4 class="mb-0">0</h4><?php endif; ?>
+                <?php foreach ($chartData['summary'] as $sum): ?>
+                    <div
+                        class="d-flex justify-content-between align-items-center mb-1 pb-1 border-bottom border-light border-opacity-25">
                         <span class="small"><?= htmlspecialchars($sum['currency'] ?: 'VND') ?></span>
                         <h5 class="mb-0 fw-bold"><?= number_format($sum['total_remaining'], 0) ?></h5>
                     </div>
@@ -313,9 +408,11 @@ function getPaymentTypeBadge($type) {
         <div class="card bg-success text-white shadow h-100">
             <div class="card-body py-3">
                 <h6 class="text-uppercase fw-bold opacity-75 small mb-2">Đã Thu Tháng Này</h6>
-                <?php if(empty($chartData['collected_this_month'])): ?><h4 class="mb-0">0</h4><?php endif; ?>
-                <?php foreach($chartData['collected_this_month'] as $col): ?>
-                    <div class="d-flex justify-content-between align-items-center mb-1 pb-1 border-bottom border-light border-opacity-25">
+                <?php if (empty($chartData['collected_this_month'])): ?>
+                    <h4 class="mb-0">0</h4><?php endif; ?>
+                <?php foreach ($chartData['collected_this_month'] as $col): ?>
+                    <div
+                        class="d-flex justify-content-between align-items-center mb-1 pb-1 border-bottom border-light border-opacity-25">
                         <span class="small"><?= htmlspecialchars($col['currency'] ?: 'VND') ?></span>
                         <h5 class="mb-0 fw-bold"><?= number_format($col['collected'], 0) ?></h5>
                     </div>
@@ -327,7 +424,8 @@ function getPaymentTypeBadge($type) {
         <div class="card bg-warning text-dark shadow h-100">
             <div class="card-body py-3">
                 <h6 class="text-uppercase fw-bold opacity-75 small">Số Khách Hàng Nợ</h6>
-                <h3 class="mb-0 fw-bold mt-2 pb-1"><?= $chartData['debtors_count'] ?> <small class="fs-6 fw-normal">người</small></h3>
+                <h3 class="mb-0 fw-bold mt-2 pb-1"><?= $chartData['debtors_count'] ?> <small
+                        class="fs-6 fw-normal">người</small></h3>
             </div>
         </div>
     </div>
@@ -364,6 +462,23 @@ function getPaymentTypeBadge($type) {
 
 <!-- ========== BẢNG DỮ LIỆU ========== -->
 <div class="card shadow-sm border-0">
+    <div class="card-header bg-white border-bottom d-flex align-items-center justify-content-between py-2 px-3">
+        <div class="d-flex align-items-center gap-2">
+            <i class="bi bi-people-fill text-primary"></i>
+            <span class="fw-semibold text-dark">Tổng số khách hàng:</span>
+            <span class="badge fs-6 px-3 py-1 <?= $isFiltered ? 'bg-primary' : 'bg-secondary' ?>">
+                <?= number_format($totalCustomers) ?> người
+            </span>
+            <?php if ($isFiltered): ?>
+                <span class="text-muted small fst-italic">(kết quả lọc)</span>
+            <?php endif; ?>
+        </div>
+        <?php if ($isFiltered): ?>
+            <a href="index.php" class="btn btn-sm btn-outline-secondary">
+                <i class="bi bi-x-circle"></i> Xoá lọc
+            </a>
+        <?php endif; ?>
+    </div>
     <div class="card-body p-0">
         <div class="table-responsive">
             <table class="table table-hover align-middle mb-0" style="font-size:0.88rem;">
@@ -378,45 +493,54 @@ function getPaymentTypeBadge($type) {
                         <th>Hạn Đóng</th>
                         <th>Hoàn Thành Liệu Trình</th>
                         <th class="text-center">Hình Thức</th>
-                        <th class="text-center">Trạng Thái Đợt</th>
+                        <th class="text-center">Trạng Thái Đợt Thanh Toán</th>
                         <th class="text-center">Trạng Thái Nợ</th>
                         <th class="text-end pe-3">Thao tác</th>
                     </tr>
                 </thead>
                 <tbody>
                     <?php if (count($installments) == 0): ?>
-                        <tr><td colspan="11" class="text-center py-4 text-muted">Không có đợt thu tiền nào khớp với bộ lọc.</td></tr>
+                        <tr>
+                            <td colspan="11" class="text-center py-4 text-muted">Không có đợt thu tiền nào khớp với bộ lọc.
+                            </td>
+                        </tr>
                     <?php endif; ?>
 
                     <?php foreach ($installments as $row): ?>
-                    <tr>
-                        <td class="ps-3 fw-bold">
-                            <a href="customer_detail.php?id=<?= $row['cust_id'] ?>" class="text-decoration-none">
-                                <?= htmlspecialchars($row['customer_name']) ?>
-                            </a>
-                        </td>
-                        <td class="text-muted small"><?= htmlspecialchars($row['email'] ?? 'Không có') ?></td>
-                        <td class="text-muted small"><?= htmlspecialchars($row['sale_name']) ?></td>
-                        <td class="text-center">
-                            <span class="badge bg-info text-dark"><?= $row['paid_installments'] ?>/<?= $row['total_installments'] ?></span>
-                        </td>
-                        <td class="fw-bold"><?= number_format($row['amount'], 0, ',', '.') ?> <?= $row['currency'] ?></td>
-                        <td class="text-danger fw-bold"><?= number_format($row['remaining'], 0, ',', '.') ?> <?= $row['currency'] ?></td>
-                        <td><?= date('d/m/Y', strtotime($row['due_date'])) ?></td>
-                        <td class="small"><?= $row['completion_date'] ? date('d/m/Y', strtotime($row['completion_date'])) : '<span class="text-muted">-</span>' ?></td>
-                        <td class="text-center"><?= getPaymentTypeBadge($row['payment_type']) ?></td>
-                        <td class="text-center"><?= getStatusBadge($row['status'], $row['due_date']) ?></td>
-                        <td class="text-center"><?= getDebtBadge($row['debt_status']) ?></td>
-                        <td class="text-end pe-3">
-                            <?php if ($row['status'] == 'pending'): ?>
-                                <a href="update_payment.php?id=<?= $row['id'] ?>&action=paid" class="btn btn-sm btn-outline-success" title="Đánh dấu Đã thu">
-                                    <i class="bi bi-check-circle"></i>
+                        <tr>
+                            <td class="ps-3 fw-bold">
+                                <a href="customer_detail.php?id=<?= $row['cust_id'] ?>" class="text-decoration-none">
+                                    <?= htmlspecialchars($row['customer_name']) ?>
                                 </a>
-                            <?php else: ?>
-                                <span class="text-success"><i class="bi bi-check2-all"></i></span>
-                            <?php endif; ?>
-                        </td>
-                    </tr>
+                            </td>
+                            <td class="text-muted small"><?= htmlspecialchars($row['email'] ?? 'Không có') ?></td>
+                            <td class="text-muted small"><?= htmlspecialchars($row['sale_name']) ?></td>
+                            <td class="text-center">
+                                <span
+                                    class="badge bg-info text-dark"><?= $row['paid_installments'] ?>/<?= $row['total_installments'] ?></span>
+                            </td>
+                            <td class="fw-bold"><?= number_format($row['amount'], 0, ',', '.') ?>     <?= $row['currency'] ?>
+                            </td>
+                            <td class="text-danger fw-bold"><?= number_format($row['remaining'], 0, ',', '.') ?>
+                                <?= $row['currency'] ?></td>
+                            <td><?= date('d/m/Y', strtotime($row['due_date'])) ?></td>
+                            <td class="small">
+                                <?= $row['completion_date'] ? date('d/m/Y', strtotime($row['completion_date'])) : '<span class="text-muted">-</span>' ?>
+                            </td>
+                            <td class="text-center"><?= getPaymentTypeBadge($row['payment_type']) ?></td>
+                            <td class="text-center"><?= getStatusBadge($row['status'], $row['due_date']) ?></td>
+                            <td class="text-center"><?= getDebtBadge($row['debt_status']) ?></td>
+                            <td class="text-end pe-3">
+                                <?php if ($row['status'] == 'pending'): ?>
+                                    <a href="update_payment.php?id=<?= $row['id'] ?>&action=paid"
+                                        class="btn btn-sm btn-outline-success" title="Đánh dấu Đã thu">
+                                        <i class="bi bi-check-circle"></i>
+                                    </a>
+                                <?php else: ?>
+                                    <span class="text-success"><i class="bi bi-check2-all"></i></span>
+                                <?php endif; ?>
+                            </td>
+                        </tr>
                     <?php endforeach; ?>
                 </tbody>
             </table>
@@ -432,86 +556,87 @@ function getPaymentTypeBadge($type) {
 
 <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.0/dist/chart.umd.min.js"></script>
 <script>
-// 1. Biểu đồ Doughnut - Trạng thái nợ
-const debtLabels = [];
-const debtValues = [];
-const debtColors = [];
-const debtColorMap = {'in_progress': '#ffc107', 'completed': '#198754', 'bad_debt': '#dc3545'};
-const debtLabelMap = {'in_progress': 'Chưa hoàn thành', 'completed': 'Đã hoàn thành', 'bad_debt': 'Nợ xấu'};
-<?php foreach ($chartData['debt_status'] as $ds): ?>
-    debtLabels.push(debtLabelMap['<?= $ds['debt_status'] ?>'] || '<?= $ds['debt_status'] ?>');
-    debtValues.push(<?= $ds['cnt'] ?>);
-    debtColors.push(debtColorMap['<?= $ds['debt_status'] ?>'] || '#6c757d');
-<?php endforeach; ?>
-new Chart(document.getElementById('chartDebt'), {
-    type: 'doughnut',
-    data: { labels: debtLabels, datasets: [{ data: debtValues, backgroundColor: debtColors }] },
-    options: { responsive: true, plugins: { legend: { position: 'bottom', labels: {font:{size:11}} } } }
-});
-
-// 2. Biểu đồ Pie - Hình thức trả góp
-const typeLabels = [];
-const typeValues = [];
-const typeLabelMap = {'monthly': 'Theo tháng', 'trip2': 'Trip 2', 'trip3': 'Trip 3'};
-<?php foreach ($chartData['payment_type'] as $pt): ?>
-    typeLabels.push(typeLabelMap['<?= $pt['payment_type'] ?>'] || '<?= $pt['payment_type'] ?>');
-    typeValues.push(<?= $pt['cnt'] ?>);
-<?php endforeach; ?>
-new Chart(document.getElementById('chartType'), {
-    type: 'pie',
-    data: { labels: typeLabels, datasets: [{ data: typeValues, backgroundColor: ['#0d6efd','#0dcaf0','#6f42c1','#6c757d'] }] },
-    options: { responsive: true, plugins: { legend: { position: 'bottom', labels: {font:{size:11}} } } }
-});
-
-// 3. Biểu đồ Bar - Thu theo tháng
-const monthlyLabels = [];
-<?php foreach ($chartData['monthly'] as $m): ?>
-    monthlyLabels.push('<?= $m['label'] ?>');
-<?php endforeach; ?>
-
-const datasets = [];
-const currencyColors = { 'VND': 'rgba(25, 135, 84, 0.7)', 'USD': 'rgba(13, 110, 253, 0.7)', 'AUD': 'rgba(255, 193, 7, 0.7)', 'NZD': 'rgba(220, 53, 69, 0.7)' };
-const currencyBorders = { 'VND': '#198754', 'USD': '#0d6efd', 'AUD': '#ffc107', 'NZD': '#dc3545' };
-
-<?php foreach($chartData['monthly_currencies'] as $index => $curr): ?>
-    var data_<?= strtolower($curr) ?> = [];
-    <?php foreach ($chartData['monthly'] as $m): ?>
-        data_<?= strtolower($curr) ?>.push(<?= isset($m['amounts'][$curr]) ? $m['amounts'][$curr] : 0 ?>);
+    // 1. Biểu đồ Doughnut - Trạng thái nợ
+    const debtLabels = [];
+    const debtValues = [];
+    const debtColors = [];
+    const debtColorMap = { 'in_progress': '#ffc107', 'completed': '#198754', 'bad_debt': '#dc3545' };
+    const debtLabelMap = { 'in_progress': 'Chưa hoàn thành', 'completed': 'Đã hoàn thành', 'bad_debt': 'Nợ xấu' };
+    <?php foreach ($chartData['debt_status'] as $ds): ?>
+        debtLabels.push(debtLabelMap['<?= $ds['debt_status'] ?>'] || '<?= $ds['debt_status'] ?>');
+        debtValues.push(<?= $ds['cnt'] ?>);
+        debtColors.push(debtColorMap['<?= $ds['debt_status'] ?>'] || '#6c757d');
     <?php endforeach; ?>
-    
-    datasets.push({
-        label: 'Đã thu (<?= $curr ?>)',
-        data: data_<?= strtolower($curr) ?>,
-        backgroundColor: currencyColors['<?= $curr ?>'] || 'rgba(108, 117, 125, 0.7)',
-        borderColor: currencyBorders['<?= $curr ?>'] || '#6c757d',
-        borderWidth: 1
+    new Chart(document.getElementById('chartDebt'), {
+        type: 'doughnut',
+        data: { labels: debtLabels, datasets: [{ data: debtValues, backgroundColor: debtColors }] },
+        options: { responsive: true, plugins: { legend: { position: 'bottom', labels: { font: { size: 11 } } } } }
     });
-<?php endforeach; ?>
 
-new Chart(document.getElementById('chartMonthly'), {
-    type: 'bar',
-    data: {
-        labels: monthlyLabels,
-        datasets: datasets
-    },
-    options: {
-        responsive: true,
-        plugins: { 
-            legend: { position: 'bottom', labels: {font:{size:11}} },
-            tooltip: {
-                callbacks: {
-                    label: function(context) {
-                        let label = context.dataset.label || '';
-                        if (label) { label += ': '; }
-                        if (context.parsed.y !== null) { label += new Intl.NumberFormat('vi-VN').format(context.parsed.y); }
-                        return label;
+    // 2. Biểu đồ Pie - Hình thức trả góp
+    const typeLabels = [];
+    const typeValues = [];
+    const typeLabelMap = { 'monthly': 'Theo tháng', 'trip2': 'Trip 2', 'trip3': 'Trip 3' };
+    <?php foreach ($chartData['payment_type'] as $pt): ?>
+        typeLabels.push(typeLabelMap['<?= $pt['payment_type'] ?>'] || '<?= $pt['payment_type'] ?>');
+        typeValues.push(<?= $pt['cnt'] ?>);
+    <?php endforeach; ?>
+    new Chart(document.getElementById('chartType'), {
+        type: 'pie',
+        data: { labels: typeLabels, datasets: [{ data: typeValues, backgroundColor: ['#0d6efd', '#0dcaf0', '#6f42c1', '#6c757d'] }] },
+        options: { responsive: true, plugins: { legend: { position: 'bottom', labels: { font: { size: 11 } } } } }
+    });
+
+    // 3. Biểu đồ Bar - Thu theo tháng
+    const monthlyLabels = [];
+    <?php foreach ($chartData['monthly'] as $m): ?>
+        monthlyLabels.push('<?= $m['label'] ?>');
+    <?php endforeach; ?>
+
+    const datasets = [];
+    const currencyColors = { 'VND': 'rgba(25, 135, 84, 0.7)', 'USD': 'rgba(13, 110, 253, 0.7)', 'AUD': 'rgba(255, 193, 7, 0.7)', 'NZD': 'rgba(220, 53, 69, 0.7)' };
+    const currencyBorders = { 'VND': '#198754', 'USD': '#0d6efd', 'AUD': '#ffc107', 'NZD': '#dc3545' };
+
+    <?php foreach ($chartData['monthly_currencies'] as $index => $curr): ?>
+        var data_<?= strtolower($curr) ?> = [];
+        <?php foreach ($chartData['monthly'] as $m): ?>
+            data_<?= strtolower($curr) ?>.push(<?= isset($m['amounts'][$curr]) ? $m['amounts'][$curr] : 0 ?>);
+        <?php endforeach; ?>
+
+        datasets.push({
+            label: 'Đã thu (<?= $curr ?>)',
+            data: data_<?= strtolower($curr) ?>,
+            backgroundColor: currencyColors['<?= $curr ?>'] || 'rgba(108, 117, 125, 0.7)',
+            borderColor: currencyBorders['<?= $curr ?>'] || '#6c757d',
+            borderWidth: 1
+        });
+    <?php endforeach; ?>
+
+    new Chart(document.getElementById('chartMonthly'), {
+        type: 'bar',
+        data: {
+            labels: monthlyLabels,
+            datasets: datasets
+        },
+        options: {
+            responsive: true,
+            plugins: {
+                legend: { position: 'bottom', labels: { font: { size: 11 } } },
+                tooltip: {
+                    callbacks: {
+                        label: function (context) {
+                            let label = context.dataset.label || '';
+                            if (label) { label += ': '; }
+                            if (context.parsed.y !== null) { label += new Intl.NumberFormat('vi-VN').format(context.parsed.y); }
+                            return label;
+                        }
                     }
                 }
-            }
-        },
-        scales: { y: { beginAtZero: true } }
-    }
-});
+            },
+            scales: { y: { beginAtZero: true } }
+        }
+    });
 </script>
 </body>
+
 </html>

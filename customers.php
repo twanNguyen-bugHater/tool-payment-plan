@@ -2,6 +2,17 @@
 // Tên file: customers.php
 require 'db.php';
 require 'header.php';
+require 'recalc_debt.php';
+
+// ======== TỰ ĐỘNG CẬP NHẬT NỢ XẤU KHI LOAD TRANG ========
+// Chỉ chạy nếu chưa recalc trong 1 giờ qua (dùng session để tránh chạy mỗi request)
+if (empty($_SESSION['last_recalc']) || (time() - $_SESSION['last_recalc']) > 3600) {
+    $stmtPending = $pdo->query("SELECT id FROM customers WHERE debt_status != 'completed'");
+    foreach ($stmtPending->fetchAll(PDO::FETCH_COLUMN) as $cid) {
+        recalcDebtStatus($pdo, (int)$cid);
+    }
+    $_SESSION['last_recalc'] = time();
+}
 
 // ======== BỘ LỌC ========
 $filter_name = $_GET['filter_name'] ?? '';
@@ -10,6 +21,8 @@ $filter_date_to = $_GET['date_to'] ?? '';
 $filter_debt = $_GET['filter_debt'] ?? '';
 $filter_payment_type = $_GET['filter_payment_type'] ?? '';
 $filter_sale = $_GET['filter_sale'] ?? '';
+$filter_currency = $_GET['filter_currency'] ?? '';
+$filter_installments = $_GET['filter_installments'] ?? '';
 $sort_by = $_GET['sort_by'] ?? 'created_desc'; // Sắp xếp mặc định
 
 // Phân quyền
@@ -49,6 +62,14 @@ if (!empty($filter_sale)) {
     $whereClause .= " AND c.sale_id = ?";
     $params[] = $filter_sale;
 }
+if (!empty($filter_currency)) {
+    $whereClause .= " AND c.currency = ?";
+    $params[] = $filter_currency;
+}
+if ($filter_installments !== '' && is_numeric($filter_installments) && (int)$filter_installments >= 0) {
+    $whereClause .= " AND (SELECT COUNT(*) FROM installments WHERE customer_id = c.id AND status = 'paid') >= ?";
+    $params[] = (int)$filter_installments;
+}
 
 // Lấy danh sách Sale cho bộ lọc (Admin/Leader)
 $saleList = [];
@@ -59,6 +80,9 @@ if ($_SESSION['role'] === 'admin') {
     $stSale->execute([$_SESSION['user_id'], $_SESSION['user_id']]);
     $saleList = $stSale->fetchAll(PDO::FETCH_ASSOC);
 }
+
+// Lấy danh sách currency có trong hệ thống
+$currencyList = $pdo->query("SELECT DISTINCT currency FROM customers WHERE currency IS NOT NULL AND currency != '' ORDER BY currency")->fetchAll(PDO::FETCH_COLUMN);
 
 // Xây dựng câu lệnh ORDER BY
 $orderBy = "ORDER BY c.created_at DESC";
@@ -78,9 +102,17 @@ $stmt = $pdo->prepare($sql);
 $stmt->execute($params);
 $customers = $stmt->fetchAll(PDO::FETCH_ASSOC);
 
+// Tổng số khách hàng theo bộ lọc
+$totalCustomers = count($customers);
+
+// Kiểm tra có đang lọc không (trừ sort_by)
+$isFiltered = !empty($filter_name) || !empty($filter_date_from) || !empty($filter_date_to)
+    || !empty($filter_debt) || !empty($filter_payment_type) || !empty($filter_sale)
+    || !empty($filter_currency) || ($filter_installments !== '' && is_numeric($filter_installments));
+
 function getDebtBadgeC($debt_status) {
     if ($debt_status === 'completed') return '<span class="badge bg-success">Đã hoàn thành</span>';
-    if ($debt_status === 'bad_debt') return '<span class="badge bg-danger">Nợ xấu</span>';
+    if ($debt_status === 'bad_debt') return '<span class="badge bg-dark">Nợ xấu</span>';
     return '<span class="badge bg-warning text-dark">Chưa hoàn thành</span>';
 }
 function getPaymentTypeBadgeC($type) {
@@ -160,6 +192,21 @@ function getPaymentTypeBadgeC($type) {
                     <option value="trip3" <?= $filter_payment_type=='trip3'?'selected':'' ?>>Trip 3</option>
                 </select>
             </div>
+            <div class="col-md-1">
+                <label class="form-label small fw-semibold mb-1">Số đợt đã trả ≥</label>
+                <input type="number" name="filter_installments" class="form-control form-control-sm"
+                       min="0" step="1" placeholder="VD: 2"
+                       value="<?= htmlspecialchars($filter_installments) ?>">
+            </div>
+            <div class="col-md-1">
+                <label class="form-label small fw-semibold mb-1">Currency</label>
+                <select name="filter_currency" class="form-select form-select-sm">
+                    <option value="">Tất cả</option>
+                    <?php foreach ($currencyList as $cur): ?>
+                        <option value="<?= htmlspecialchars($cur) ?>" <?= $filter_currency===$cur?'selected':'' ?>><?= htmlspecialchars($cur) ?></option>
+                    <?php endforeach; ?>
+                </select>
+            </div>
             <div class="col-md-2">
                 <label class="form-label small fw-semibold mb-1"><i class="bi bi-sort-down"></i> Sắp xếp</label>
                 <select name="sort_by" class="form-select form-select-sm border-primary">
@@ -180,6 +227,23 @@ function getPaymentTypeBadgeC($type) {
 
 <!-- BẢNG KHÁCH HÀNG -->
 <div class="card shadow-sm border-0">
+    <div class="card-header bg-white border-bottom d-flex align-items-center justify-content-between py-2 px-3">
+        <div class="d-flex align-items-center gap-2">
+            <i class="bi bi-people-fill text-primary"></i>
+            <span class="fw-semibold text-dark">Tổng số khách hàng:</span>
+            <span class="badge fs-6 px-3 py-1 <?= $isFiltered ? 'bg-primary' : 'bg-secondary' ?>">
+                <?= number_format($totalCustomers) ?> người
+            </span>
+            <?php if ($isFiltered): ?>
+                <span class="text-muted small fst-italic">(kết quả lọc)</span>
+            <?php endif; ?>
+        </div>
+        <?php if ($isFiltered): ?>
+            <a href="customers.php" class="btn btn-sm btn-outline-secondary">
+                <i class="bi bi-x-circle"></i> Xoá lọc
+            </a>
+        <?php endif; ?>
+    </div>
     <div class="card-body p-0">
         <div class="table-responsive">
             <table class="table table-hover align-middle mb-0" style="font-size: 0.88rem;">
@@ -191,6 +255,7 @@ function getPaymentTypeBadgeC($type) {
                         <th>Sale Quản Lý</th>
                         <th class="text-center">Đợt</th>
                         <th>Tổng Tiền</th>
+                        <th>Tiền Đăng Ký Trả Góp</th>
                         <th>Còn Nợ</th>
                         <th>Hoàn Thành Liệu Trình</th>
                         <th class="text-center">Hình Thức</th>
@@ -204,7 +269,7 @@ function getPaymentTypeBadgeC($type) {
                     <?php endif; ?>
 
                     <?php foreach ($customers as $row): ?>
-                    <tr style="cursor:pointer;" onclick="window.location='customer_detail.php?id=<?= $row['id'] ?>'">
+                    <tr style="cursor:pointer;" onclick="window.open('customer_detail.php?id=<?= $row['id'] ?>', '_blank')">
                         <td class="ps-3 text-muted">#<?= $row['id'] ?></td>
                         <td class="fw-bold"><?= htmlspecialchars($row['name']) ?></td>
                         <td class="text-muted small"><?= htmlspecialchars($row['email'] ?? 'Không có') ?></td>
@@ -213,6 +278,7 @@ function getPaymentTypeBadgeC($type) {
                             <span class="badge bg-info text-dark"><?= $row['paid_installments'] ?>/<?= $row['total_installments'] ?></span>
                         </td>
                         <td class="fw-bold"><?= number_format($row['total_bill'], 0, ',', '.') ?> <?= $row['currency'] ?></td>
+                        <td class="fw-bold text-warning"><?= number_format($row['initial_debt'] ?? 0, 0, ',', '.') ?> <?= $row['currency'] ?></td>
                         <td class="fw-bold text-danger"><?= number_format($row['remaining'], 0, ',', '.') ?> <?= $row['currency'] ?></td>
                         <td class="small"><?= $row['completion_date'] ? date('d/m/Y', strtotime($row['completion_date'])) : '<span class="text-muted">-</span>' ?></td>
                         <td class="text-center"><?= getPaymentTypeBadgeC($row['payment_type']) ?></td>
