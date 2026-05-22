@@ -6,6 +6,10 @@ require 'recalc_debt.php';
 
 // ======== TỰ ĐỘNG CẬP NHẬT NỢ XẤU KHI LOAD TRANG ========
 if (empty($_SESSION['last_recalc']) || (time() - $_SESSION['last_recalc']) > 3600) {
+    // Fix data cũ: đổi 'cancelled' → 'pending' hoặc 'late' tùy ngày hạn
+    $pdo->exec("UPDATE installments SET status = 'late'    WHERE status = 'cancelled' AND due_date <  CURDATE()");
+    $pdo->exec("UPDATE installments SET status = 'pending' WHERE status = 'cancelled' AND due_date >= CURDATE()");
+
     $stmtPending = $pdo->query("SELECT id FROM customers WHERE debt_status != 'completed'");
     foreach ($stmtPending->fetchAll(PDO::FETCH_COLUMN) as $cid) {
         recalcDebtStatus($pdo, (int)$cid);

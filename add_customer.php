@@ -93,7 +93,6 @@ if ($_SESSION['role'] === 'admin') {
                             <select name="debt_status" class="form-select">
                                 <option value="in_progress">Chưa hoàn thành</option>
                                 <option value="completed">Đã hoàn thành</option>
-                                <option value="bad_debt">Nợ xấu</option>
                             </select>
                         </div>
                     </div>

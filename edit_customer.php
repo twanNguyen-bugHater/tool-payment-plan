@@ -158,10 +158,9 @@ if (!$canEdit) {
                             </td>
                             <td>
                                 <select name="inst_status[]" class="form-select form-select-sm <?= $inst['status']=='paid'?'bg-success text-white':'' ?>">
-                                    <option value="pending" <?= $inst['status']=='pending'?'selected':'' ?>>Chờ thu</option>
+                                    <option value="pending" <?= ($inst['status']=='pending' || $inst['status']=='cancelled')?'selected':'' ?>>Chờ thu</option>
                                     <option value="paid" <?= $inst['status']=='paid'?'selected':'' ?>>Đã thu</option>
                                     <option value="late" <?= $inst['status']=='late'?'selected':'' ?>>Quá hạn</option>
-                                    <option value="cancelled" <?= $inst['status']=='cancelled'?'selected':'' ?>>Nợ xấu</option>
                                 </select>
                             </td>
                             <td>

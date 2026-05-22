@@ -26,6 +26,7 @@ if (isset($_SESSION['role']) && ($_SESSION['role'] === 'admin' || $_SESSION['rol
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <link rel="icon" href="favicon_syd.png" type="image/png">
     <title>Tool Quản Lý Trả Góp</title>
     <!-- CSS Bootstrap 5 -->
     <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/css/bootstrap.min.css" rel="stylesheet">

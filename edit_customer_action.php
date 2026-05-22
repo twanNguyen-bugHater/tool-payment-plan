@@ -92,6 +92,11 @@ try {
         $amt = floatval($inst_amounts[$i]);
         $st = $inst_statuses[$i];
         $pdate = !empty($inst_payment_dates[$i]) ? $inst_payment_dates[$i] : null;
+
+        // Nếu status là 'cancelled' (data cũ lỡ chọn), tự động convert sang pending/late
+        if ($st === 'cancelled') {
+            $st = (!empty($due) && $due < date('Y-m-d')) ? 'late' : 'pending';
+        }
         
         // Nếu chọn paid nhưng để trống ngày thu, sẽ tự lấy hnay (ngoại trừ NEW form)
         if ($st === 'paid') {
